@@ -1,9 +1,9 @@
 import json
 import pandas as pd
 
-business_file = "yelp_academic_dataset_tip.json"
-ids_file = "train-business-ids-only.csv"
-output_file = "filtered_yelp_tip.json"
+business_file = "Yelp JSON/yelp_dataset/yelp_academic_dataset_user.json"
+ids_file = "Yelp JSON/yelp_dataset/train-business-ids-only.csv"
+output_file = "Yelp JSON/yelp_dataset/filtered_yelp_.json"
 
 valid_ids = set(pd.read_csv(ids_file)['business_id'])
 
@@ -13,6 +13,18 @@ with open(business_file, "r", encoding="utf-8") as fin, \
     for line in fin:
         record = json.loads(line)
         if record["business_id"] in valid_ids:
+            Remove these values
+            for key in ["review_count", "yelping_since", "useful", "funny", "cool", "elite" , "friends", "fans"]:
+                record.pop(key, None)
             fout.write(json.dumps(record) + "\n")
+
+        # Keep these values
+        # keep_keys = [
+        #     "user_id", "name", "review_count", "average_stars"
+        # ]
+
+        # record = {key: record.get(key) for key in keep_keys}
+
+        fout.write(json.dumps(record) + "\n")
 
 print(f"Filtering complete. Saved filtered data to: {output_file}")
