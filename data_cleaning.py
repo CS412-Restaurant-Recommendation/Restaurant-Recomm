@@ -1,9 +1,9 @@
 import json
 import pandas as pd
 
-business_file = "Yelp JSON/yelp_dataset/yelp_academic_dataset_user.json"
-ids_file = "Yelp JSON/yelp_dataset/train-business-ids-only.csv"
-output_file = "Yelp JSON/yelp_dataset/filtered_yelp_.json"
+business_file = "Dataset/yelp_academic_dataset_user.json"
+ids_file = "Dataset/train-business-ids-only.csv"
+output_file = "Dataset/filtered_yelp_.json"
 
 valid_ids = set(pd.read_csv(ids_file)['business_id'])
 
