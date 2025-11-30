@@ -4,16 +4,9 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 MODEL_NAME = "nlptown/bert-base-multilingual-uncased-sentiment"
 
-# ===========
-# 1. LOAD MODEL
-# ===========
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
 
-
-# ===========
-# 2. SENTIMENT FUNCTION
-# ===========
 def predict_sentiment(text: str) -> int:
     """
     Predict a star rating (1–5) for a given review text.
