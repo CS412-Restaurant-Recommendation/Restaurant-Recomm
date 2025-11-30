@@ -13,6 +13,7 @@ business = pd.read_pickle(data_dir / "business_df.pkl")
 business_features = pd.read_pickle(data_dir / "business_features.pkl")
 bizid_to_idx = pd.read_pickle(data_dir / "bizid_to_idx.pkl").to_dict()
 reviews = pd.read_pickle(data_dir / "reviews_df.pkl")
+user_city_map = pd.read_pickle(data_dir / "user_city_map.pkl").to_dict()
 
 # Extract category feature matrix (exclude business_id column)
 cat_feature_cols = [c for c in business_features.columns if c != "business_id"]
@@ -84,6 +85,12 @@ def score_items_for_user(user_id, rating_threshold=4.0, min_review_count=5):
 # 4. TOP-N RECOMMEND FUNCTION
 # ===========
 def recommend_for_user(user_id, top_n=10, rating_threshold=4.0):
+    # Get inferred city for this user
+    user_city = user_city_map.get(user_id)
+    if user_city is None:
+        print("No inferred city for this user; cannot filter by location.")
+        return pd.DataFrame()
+
     scores = score_items_for_user(user_id, rating_threshold=rating_threshold)
     if scores is None:
         print("Cold-start user: no high-rated history.")
@@ -93,23 +100,25 @@ def recommend_for_user(user_id, top_n=10, rating_threshold=4.0):
     rated_biz_ids = reviews[reviews["user_id"] == user_id]["business_id"].unique()
     rated_mask = business["business_id"].isin(rated_biz_ids)
 
-    candidate_indices = np.where(~rated_mask.values)[0]
-    candidate_scores = scores[candidate_indices]
+    # Filter to same city
+    same_city_mask = business["city"] == user_city
 
-    # Top-N indices among candidates
+    candidate_mask = (~rated_mask) & same_city_mask
+    candidate_indices = np.where(candidate_mask.values)[0]
+
     if len(candidate_indices) == 0:
-        print("No candidate restaurants left.")
+        print("No candidate restaurants left in user city:", user_city)
         return pd.DataFrame()
+
+    candidate_scores = scores[candidate_indices]
 
     top_n = min(top_n, len(candidate_indices))
     top_idx_local = np.argpartition(-candidate_scores, top_n - 1)[:top_n]
     top_idx = candidate_indices[top_idx_local]
 
-    # Build result DataFrame
-    result = business.iloc[top_idx][["business_id", "name", "stars", "review_count", "categories"]].copy()
+    result = business.iloc[top_idx][["business_id", "name", "city", "stars", "review_count", "categories"]].copy()
     result["score"] = scores[top_idx]
 
-    # Sort by score descending
     result = result.sort_values("score", ascending=False).reset_index(drop=True)
     return result
 

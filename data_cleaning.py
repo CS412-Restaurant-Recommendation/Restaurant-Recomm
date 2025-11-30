@@ -1,7 +1,7 @@
 import json
 import pandas as pd
 
-business_file = "Dataset/filtered_yelp_business.json"
+business_file = "Dataset/yelp_academic_dataset_business.json"
 ids_file = "Dataset/train-business-ids-only.csv"
 output_file = "Dataset/filtered_yelp_.json"
 
