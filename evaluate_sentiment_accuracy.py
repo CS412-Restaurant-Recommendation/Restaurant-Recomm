@@ -6,7 +6,7 @@ from sentiment_analysis import predict_sentiment
 # 1. LOAD DATA
 # ===========
 file_path = "Dataset/filtered_yelp_review.json"
-df = pd.read_json(file_path, lines=True, nrows=500)
+df = pd.read_json(file_path, lines=True, nrows=1000)
 
 print("Loaded reviews:", df.shape)
 
@@ -26,7 +26,7 @@ for idx, row in df.iterrows():
     pred_rating = predict_sentiment(text)
 
     # If model rating is within ±1 of true rating → correct
-    if abs(pred_rating - true_rating) <= 1:
+    if abs(pred_rating - true_rating) <= 0:
         correct += 1
 
     # Optional progress output every 1000 rows
