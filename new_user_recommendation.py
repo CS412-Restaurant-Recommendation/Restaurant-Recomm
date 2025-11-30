@@ -20,4 +20,4 @@ df["weighted_rating"] = (v / (v + m)) * R + (m / (v + m)) * C
 
 top20 = df.sort_values("weighted_rating", ascending=False).head(20)
 
-print(top20[["name", "city", "stars", "review_count", "weighted_rating", "categories"]])
+print(top20[["name", "stars", "review_count", "weighted_rating", "categories"]])
