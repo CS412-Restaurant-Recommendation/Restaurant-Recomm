@@ -1,7 +1,7 @@
 import pandas as pd
 
 # Load Yelp JSON lines file
-df = pd.read_json("Yelp JSON/yelp_dataset/filtered_yelp_business.json", lines=True)
+df = pd.read_json("Dataset/filtered_yelp_business.json", lines=True)
 
 # Ensure numeric columns
 df["review_count"] = pd.to_numeric(df["review_count"], errors="coerce")
