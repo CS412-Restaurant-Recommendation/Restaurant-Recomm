@@ -2,71 +2,82 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 
 data_dir = Path("Dataset")
 
 # ===========
-# 1. LOAD PRECOMPUTED OBJECTS
+# 1. LOAD OBJECTS
 # ===========
 business = pd.read_pickle(data_dir / "business_df.pkl")
-business_features = pd.read_pickle(data_dir / "business_features.pkl")
-bizid_to_idx = pd.read_pickle(data_dir / "bizid_to_idx.pkl").to_dict()
 reviews_full = pd.read_pickle(data_dir / "reviews_df.pkl")
+user_city_map = pd.read_pickle(data_dir / "user_city_map.pkl").to_dict()
 
-# Extract category feature matrix (exclude business_id column)
-cat_feature_cols = [c for c in business_features.columns if c != "business_id"]
-item_cat_matrix = business_features[cat_feature_cols].values  # [n_items, n_cats]
+# Ensure necessary columns exist
+assert "business_id" in business.columns
+assert "city" in business.columns
+assert {"user_id", "business_id", "stars"}.issubset(reviews_full.columns)
 
 
 # ===========
-# 2. USER PROFILE
+# 2. POPULARITY-BASED RECOMMENDER (same idea as in recommend.py)
 # ===========
-def build_user_profile_from_reviews(user_reviews, rating_threshold=4.0):
+def recommend_popular_in_city_for_eval(user_id, train_reviews, top_n=50, min_review_count=1):
     """
-    Build user profile from a DataFrame of this user's TRAIN reviews only.
-    user_reviews: DataFrame with columns ['user_id', 'business_id', 'stars'].
+    Popularity-based recommendations for evaluation.
+
+    - user_id: current user
+    - train_reviews: this user's TRAIN reviews (used to exclude already-known restaurants)
+    - top_n: how many items to recommend
+    - min_review_count: minimum number of reviews for a restaurant to be a candidate
     """
-    liked = user_reviews[user_reviews["stars"] >= rating_threshold]
-    if liked.empty:
-        return None
+    user_city = user_city_map.get(user_id)
+    if user_city is None:
+        return []
 
-    liked_biz_ids = liked["business_id"].unique()
-    liked_indices = [bizid_to_idx[b] for b in liked_biz_ids if b in bizid_to_idx]
+    # Restaurants in this city
+    same_city_mask = business["city"] == user_city
+    city_biz = business[same_city_mask].copy()
+    if city_biz.empty:
+        return []
 
-    if not liked_indices:
-        return None
+    # Exclude restaurants seen in TRAIN
+    seen_train_biz_ids = train_reviews["business_id"].unique()
+    city_biz = city_biz[~city_biz["business_id"].isin(seen_train_biz_ids)]
+    if city_biz.empty:
+        return []
 
-    liked_matrix = item_cat_matrix[liked_indices]
-    user_vec = liked_matrix.mean(axis=0)
+    # Filter by min_review_count (popularity filter)
+    city_biz = city_biz[city_biz["review_count"] >= min_review_count]
+    if city_biz.empty:
+        return []
 
-    norm = np.linalg.norm(user_vec)
-    if norm > 0:
-        user_vec = user_vec / norm
+    # Sort by popularity (review_count), then rating as tie-breaker
+    city_biz = city_biz.sort_values(
+        by=["review_count", "stars"],
+        ascending=[False, False],
+    )
 
-    return user_vec
-
-
-def score_items_for_user_vec(user_vec):
-    """Cosine similarity between user_vec and all restaurants."""
-    return cosine_similarity(user_vec.reshape(1, -1), item_cat_matrix)[0]
+    # Return top_n business_ids as recommendation list
+    rec_ids = city_biz["business_id"].head(top_n).tolist()
+    return rec_ids
 
 
 # ===========
-# 3. RANKING METRICS
+# 3. METRICS
 # ===========
 def precision_recall_hit_at_k(ranked_items, relevant_items, k):
     """
-    ranked_items: list/array of business_ids sorted by score (best first).
-    relevant_items: set of business_ids the user liked in TEST.
+    ranked_items: list of business_ids, sorted by rec quality.
+    relevant_items: set of business_ids from test (visited by user).
     """
+    if k > len(ranked_items):
+        k = len(ranked_items)
     top_k = ranked_items[:k]
     top_k_set = set(top_k)
 
     hits = len(top_k_set & relevant_items)
     hit = 1.0 if hits > 0 else 0.0
-
     precision = hits / float(k) if k > 0 else 0.0
     recall = hits / float(len(relevant_items)) if len(relevant_items) > 0 else 0.0
 
@@ -74,16 +85,24 @@ def precision_recall_hit_at_k(ranked_items, relevant_items, k):
 
 
 # ===========
-# 4. OFFLINE EVALUATION
+# 4. EVALUATION LOOP
 # ===========
-def evaluate_model(rating_threshold_like=4.0, k=10, min_user_reviews=5, max_users=500, random_state=42):
+def evaluate_popularity_model(k=50, min_user_reviews=5, max_users=1000,
+                              min_review_count_item=1, random_state=42):
+    """
+    Evaluate popularity-based recommender:
+    - Train/test split: 75% train, 25% test per user.
+    - Recommendations: most popular unseen restaurants in user's city.
+    - Relevant items: all restaurants in test (restaurants the user visited/rated).
+    """
+
     users = reviews_full["user_id"].value_counts()
     eligible_users = users[users >= min_user_reviews].index
 
+    # Sample subset of users for speed
     rng = np.random.default_rng(random_state)
     if len(eligible_users) > max_users:
         eligible_users = rng.choice(eligible_users, size=max_users, replace=False)
-
 
     precisions, recalls, hits = [], [], []
     n_users_eval = 0
@@ -91,51 +110,34 @@ def evaluate_model(rating_threshold_like=4.0, k=10, min_user_reviews=5, max_user
     for user_id in eligible_users:
         user_reviews = reviews_full[reviews_full["user_id"] == user_id]
 
-        # 75/25 split on this user's interactions
+        # 75/25 split for this user's interactions
         train_reviews, test_reviews = train_test_split(
             user_reviews,
             test_size=0.25,
-            random_state=42,
+            random_state=random_state,
             shuffle=True,
         )
 
-        # Build user profile from TRAIN only
-        user_vec = build_user_profile_from_reviews(
-            train_reviews,
-            rating_threshold=rating_threshold_like,
-        )
-        if user_vec is None:
-            continue  # skip users with no liked items in train
-
-        # Identify relevant items in TEST (liked restaurants)
-        test_liked = test_reviews[test_reviews["stars"] >= rating_threshold_like]
-        relevant_biz_ids = set(test_liked["business_id"].unique())
-        if not relevant_biz_ids:
-            continue  # nothing to evaluate for this user
-
-        # Score all restaurants
-        scores = score_items_for_user_vec(user_vec)
-
-        # Exclude items seen in TRAIN (we want to recommend unseen ones)
-        seen_train_biz = set(train_reviews["business_id"].unique())
-        seen_mask = business["business_id"].isin(seen_train_biz)
-        candidate_indices = np.where(~seen_mask.values)[0]
-
-        if len(candidate_indices) == 0:
+        if test_reviews.empty:
             continue
 
-        candidate_scores = scores[candidate_indices]
-        # Sort candidates by score descending
-        sorted_idx_local = np.argsort(-candidate_scores)
-        ranked_indices = candidate_indices[sorted_idx_local]
+        # Relevant items: all restaurants in test (user visited/rated)
+        relevant_biz_ids = set(test_reviews["business_id"].unique())
+        if not relevant_biz_ids:
+            continue
 
-        ranked_biz_ids = business.iloc[ranked_indices]["business_id"].tolist()
-
-        # Compute metrics for this user
-        prec, rec, hit = precision_recall_hit_at_k(
-            ranked_biz_ids, relevant_biz_ids, k
+        # Get popularity-based recommendations for this user
+        rec_ids = recommend_popular_in_city_for_eval(
+            user_id=user_id,
+            train_reviews=train_reviews,
+            top_n=k,  # we’ll evaluate at K using this list
+            min_review_count=min_review_count_item,
         )
 
+        if not rec_ids:
+            continue
+
+        prec, rec, hit = precision_recall_hit_at_k(rec_ids, relevant_biz_ids, k)
         precisions.append(prec)
         recalls.append(rec)
         hits.append(hit)
@@ -152,9 +154,11 @@ def evaluate_model(rating_threshold_like=4.0, k=10, min_user_reviews=5, max_user
 
 
 if __name__ == "__main__":
-    # You can tweak these:
-    evaluate_model(
-        rating_threshold_like=4.0,  # what counts as "liked"
-        k=10,                       # top-K cutoff
-        min_user_reviews=5,         # only evaluate users with at least 5 reviews
+    # Example: evaluate top-50 popular restaurants per user
+    evaluate_popularity_model(
+        k=50,
+        min_user_reviews=5,
+        max_users=1000,
+        min_review_count_item=1,  # or 5 / 10 to only consider more popular places
+        random_state=42,
     )
