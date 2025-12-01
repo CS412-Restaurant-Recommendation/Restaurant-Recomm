@@ -2,6 +2,7 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
 
 data_dir = Path("Dataset")
@@ -10,69 +11,143 @@ data_dir = Path("Dataset")
 # 1. LOAD OBJECTS
 # ===========
 business = pd.read_pickle(data_dir / "business_df.pkl")
+business_features = pd.read_pickle(data_dir / "business_features.pkl")
+bizid_to_idx = pd.read_pickle(data_dir / "bizid_to_idx.pkl").to_dict()
 reviews_full = pd.read_pickle(data_dir / "reviews_df.pkl")
 user_city_map = pd.read_pickle(data_dir / "user_city_map.pkl").to_dict()
 
-# Ensure necessary columns exist
-assert "business_id" in business.columns
-assert "city" in business.columns
-assert {"user_id", "business_id", "stars"}.issubset(reviews_full.columns)
+# Category feature matrix
+cat_feature_cols = [c for c in business_features.columns if c != "business_id"]
+item_cat_matrix = business_features[cat_feature_cols].values  # [n_items, n_cats]
 
 
 # ===========
-# 2. POPULARITY-BASED RECOMMENDER (same idea as in recommend.py)
+# 2. USER PROFILE (same as in unified recommender)
 # ===========
-def recommend_popular_in_city_for_eval(user_id, train_reviews, top_n=50, min_review_count=1):
+def build_user_profile_from_reviews(user_reviews, rating_threshold=4.0):
     """
-    Popularity-based recommendations for evaluation.
+    Build user category profile from this user's TRAIN reviews only.
+    user_reviews: DataFrame with ['user_id', 'business_id', 'stars'].
+    """
+    liked = user_reviews[user_reviews["stars"] >= rating_threshold]
+    if liked.empty:
+        return None
 
-    - user_id: current user
-    - train_reviews: this user's TRAIN reviews (used to exclude already-known restaurants)
-    - top_n: how many items to recommend
-    - min_review_count: minimum number of reviews for a restaurant to be a candidate
+    liked_biz_ids = liked["business_id"].unique()
+    liked_indices = [bizid_to_idx[b] for b in liked_biz_ids if b in bizid_to_idx]
+
+    if not liked_indices:
+        return None
+
+    liked_matrix = item_cat_matrix[liked_indices]
+    user_vec = liked_matrix.mean(axis=0)
+
+    # Normalize
+    norm = np.linalg.norm(user_vec)
+    if norm > 0:
+        user_vec = user_vec / norm
+
+    return user_vec
+
+
+# ===========
+# 3. RECOMMENDATION LOGIC (mirrors unified recommend_for_user)
+# ===========
+def recommend_for_user_eval(user_id,
+                            train_reviews,
+                            top_n=50,
+                            rating_threshold=3.0,
+                            min_review_count=1,
+                            alpha_popularity=1.0):
     """
+    Combined model for evaluation:
+    - Build user profile from TRAIN reviews.
+    - Recommend restaurants in user's city, excluding TRAIN restaurants.
+    - Score by category similarity boosted by popularity (review_count, stars).
+    Returns a ranked list of business_ids.
+    """
+    # Get inferred city
     user_city = user_city_map.get(user_id)
     if user_city is None:
         return []
 
-    # Restaurants in this city
-    same_city_mask = business["city"] == user_city
-    city_biz = business[same_city_mask].copy()
-    if city_biz.empty:
-        return []
-
-    # Exclude restaurants seen in TRAIN
-    seen_train_biz_ids = train_reviews["business_id"].unique()
-    city_biz = city_biz[~city_biz["business_id"].isin(seen_train_biz_ids)]
-    if city_biz.empty:
-        return []
-
-    # Filter by min_review_count (popularity filter)
-    city_biz = city_biz[city_biz["review_count"] >= min_review_count]
-    if city_biz.empty:
-        return []
-
-    # Sort by popularity (review_count), then rating as tie-breaker
-    city_biz = city_biz.sort_values(
-        by=["review_count", "stars"],
-        ascending=[False, False],
+    # Build user profile from TRAIN only
+    user_vec = build_user_profile_from_reviews(
+        train_reviews,
+        rating_threshold=rating_threshold,
     )
+    if user_vec is None:
+        return []
 
-    # Return top_n business_ids as recommendation list
-    rec_ids = city_biz["business_id"].head(top_n).tolist()
-    return rec_ids
+    # Content scores (similarity to all restaurants)
+    content_scores = cosine_similarity(
+        user_vec.reshape(1, -1),
+        item_cat_matrix
+    )[0]  # [n_items]
+
+    # Popularity / quality factor
+    biz_stars = business["stars"].values.astype(float)
+    biz_reviews = business["review_count"].values.astype(float)
+
+    # Normalize stars to [0,1]
+    stars_norm = (biz_stars - 1.0) / (5.0 - 1.0)
+
+    # Normalize log(review_count+1) to [0,1]
+    log_counts = np.log1p(biz_reviews)
+    log_counts_norm = (log_counts - log_counts.min()) / (log_counts.max() - log_counts.min() + 1e-8)
+
+    # Popularity weight — heavier on review_count
+    popularity = 0.3 * stars_norm + 0.7 * log_counts_norm
+
+    # Combined score
+    final_scores = content_scores * (1.0 + alpha_popularity * popularity)
+
+    # Exclude TRAIN restaurants (already visited in train)
+    train_biz_ids = set(train_reviews["business_id"].unique())
+    rated_mask = business["business_id"].isin(train_biz_ids)
+
+    # Restrict to same city
+    same_city_mask = business["city"] == user_city
+
+    # Optional: minimum number of reviews
+    enough_reviews_mask = business["review_count"] >= min_review_count
+
+    candidate_mask = (~rated_mask) & same_city_mask & enough_reviews_mask
+    candidate_indices = np.where(candidate_mask.values)[0]
+
+    if len(candidate_indices) == 0:
+        return []
+
+    candidate_scores = final_scores[candidate_indices]
+
+    # Top-N candidates
+    top_n = min(top_n, len(candidate_indices))
+    top_idx_local = np.argpartition(-candidate_scores, top_n - 1)[:top_n]
+    top_idx = candidate_indices[top_idx_local]
+
+    # Sort properly
+    top_scores = final_scores[top_idx]
+    order = np.argsort(-top_scores)
+    top_idx = top_idx[order]
+
+    ranked_biz_ids = business.iloc[top_idx]["business_id"].tolist()
+    return ranked_biz_ids
 
 
 # ===========
-# 3. METRICS
+# 4. METRICS
 # ===========
 def precision_recall_hit_at_k(ranked_items, relevant_items, k):
     """
-    ranked_items: list of business_ids, sorted by rec quality.
-    relevant_items: set of business_ids from test (visited by user).
+    ranked_items: list of business_ids sorted by score.
+    relevant_items: set of business_ids from test (restaurants user visited).
     """
+    if len(ranked_items) == 0:
+        return 0.0, 0.0, 0.0
+
     if k > len(ranked_items):
         k = len(ranked_items)
+
     top_k = ranked_items[:k]
     top_k_set = set(top_k)
 
@@ -85,21 +160,27 @@ def precision_recall_hit_at_k(ranked_items, relevant_items, k):
 
 
 # ===========
-# 4. EVALUATION LOOP
+# 5. EVALUATION LOOP
 # ===========
-def evaluate_popularity_model(k=50, min_user_reviews=5, max_users=1000,
-                              min_review_count_item=1, random_state=42):
+def evaluate_model(rating_threshold_like=4.0,
+                   k=50,
+                   min_user_reviews=5,
+                   max_users=1000,
+                   min_review_count_item=1,
+                   alpha_popularity=1.0,
+                   random_state=42):
     """
-    Evaluate popularity-based recommender:
-    - Train/test split: 75% train, 25% test per user.
-    - Recommendations: most popular unseen restaurants in user's city.
-    - Relevant items: all restaurants in test (restaurants the user visited/rated).
-    """
+    Evaluate the unified (category + city + popularity) recommender.
 
+    - For each user with >= min_user_reviews:
+      * Split their reviews 75% train / 25% test.
+      * Build profile from train.
+      * Recommend top-K restaurants in their city, unseen in train.
+      * Relevant items = all restaurants in test (visited).
+    """
     users = reviews_full["user_id"].value_counts()
     eligible_users = users[users >= min_user_reviews].index
 
-    # Sample subset of users for speed
     rng = np.random.default_rng(random_state)
     if len(eligible_users) > max_users:
         eligible_users = rng.choice(eligible_users, size=max_users, replace=False)
@@ -110,7 +191,7 @@ def evaluate_popularity_model(k=50, min_user_reviews=5, max_users=1000,
     for user_id in eligible_users:
         user_reviews = reviews_full[reviews_full["user_id"] == user_id]
 
-        # 75/25 split for this user's interactions
+        # 75/25 split
         train_reviews, test_reviews = train_test_split(
             user_reviews,
             test_size=0.25,
@@ -121,23 +202,24 @@ def evaluate_popularity_model(k=50, min_user_reviews=5, max_users=1000,
         if test_reviews.empty:
             continue
 
-        # Relevant items: all restaurants in test (user visited/rated)
+        # Relevant items: all restaurants in test set
         relevant_biz_ids = set(test_reviews["business_id"].unique())
         if not relevant_biz_ids:
             continue
 
-        # Get popularity-based recommendations for this user
-        rec_ids = recommend_popular_in_city_for_eval(
+        ranked_biz_ids = recommend_for_user_eval(
             user_id=user_id,
             train_reviews=train_reviews,
-            top_n=k,  # we’ll evaluate at K using this list
+            top_n=k,
+            rating_threshold=rating_threshold_like,
             min_review_count=min_review_count_item,
+            alpha_popularity=alpha_popularity,
         )
 
-        if not rec_ids:
+        if not ranked_biz_ids:
             continue
 
-        prec, rec, hit = precision_recall_hit_at_k(rec_ids, relevant_biz_ids, k)
+        prec, rec, hit = precision_recall_hit_at_k(ranked_biz_ids, relevant_biz_ids, k)
         precisions.append(prec)
         recalls.append(rec)
         hits.append(hit)
@@ -154,11 +236,13 @@ def evaluate_popularity_model(k=50, min_user_reviews=5, max_users=1000,
 
 
 if __name__ == "__main__":
-    # Example: evaluate top-50 popular restaurants per user
-    evaluate_popularity_model(
-        k=50,
+    # Adjust parameters as needed
+    evaluate_model(
+        rating_threshold_like=3.0,   # how you define "liked" when building the profile
+        k=50,                        # size of recommendation list evaluated
         min_user_reviews=5,
         max_users=1000,
-        min_review_count_item=1,  # or 5 / 10 to only consider more popular places
+        min_review_count_item=10,    # only recommend restaurants with >= 10 reviews
+        alpha_popularity=1.0,        # how strongly popularity boosts the content score
         random_state=42,
     )
