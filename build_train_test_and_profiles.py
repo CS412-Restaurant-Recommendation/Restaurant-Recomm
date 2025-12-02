@@ -36,7 +36,7 @@ keep_biz_ids = set(business["business_id"])
 reviews = reviews[reviews["business_id"].isin(keep_biz_ids)].reset_index(drop=True)
 
 # 1c. OPTIONAL: DROP USERS WITH VERY FEW REMAINING REVIEWS
-MIN_USER_REVIEWS = 2  # or 3/5 if you want denser users
+MIN_USER_REVIEWS = 5  # or 3/5 if you want denser users
 user_counts = reviews["user_id"].value_counts()
 keep_users = set(user_counts[user_counts >= MIN_USER_REVIEWS].index)
 reviews = reviews[reviews["user_id"].isin(keep_users)].reset_index(drop=True)
