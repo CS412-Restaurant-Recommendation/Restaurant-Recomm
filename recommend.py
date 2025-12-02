@@ -1,131 +1,156 @@
-# file: recommender.py
-import numpy as np
+# file: recommend.py
+
 import pandas as pd
+import numpy as np
 from pathlib import Path
-from sklearn.metrics.pairwise import cosine_similarity
 
 data_dir = Path("Dataset")
 
-# ===========
-# 1. LOAD PRECOMPUTED OBJECTS
-# ===========
+# ===============
+# 1. LOAD OBJECTS
+# ===============
+
+# Business data (same for train/test)
 business = pd.read_pickle(data_dir / "business_df.pkl")
-business_features = pd.read_pickle(data_dir / "business_features.pkl")
-bizid_to_idx = pd.read_pickle(data_dir / "bizid_to_idx.pkl").to_dict()
-reviews = pd.read_pickle(data_dir / "reviews_df.pkl")
+
+# TRAIN reviews only
+reviews = pd.read_pickle(data_dir / "reviews_train.pkl")
+
+# User -> city mapping built from TRAIN reviews only
 user_city_map = pd.read_pickle(data_dir / "user_city_map.pkl").to_dict()
 
-# Extract category feature matrix (exclude business_id column)
-cat_feature_cols = [c for c in business_features.columns if c != "business_id"]
-item_cat_matrix = business_features[cat_feature_cols].values  # shape: [n_items, n_cats]
+# Category features (built from all businesses, but user profiles use TRAIN reviews)
+business_features = pd.read_pickle(data_dir / "business_features.pkl")
+business_features = business_features.set_index("business_id")
 
-# ===========
-# 2. BUILD USER PROFILE (CATEGORY VECTOR)
-# ===========
-def build_user_profile(user_id, rating_threshold=4.0):
+# Sanity check
+required_biz_cols = {"business_id", "name", "stars", "review_count", "categories", "city"}
+required_rev_cols = {"user_id", "business_id", "stars"}
+
+missing_biz = required_biz_cols - set(business.columns)
+missing_rev = required_rev_cols - set(reviews.columns)
+
+if missing_biz:
+    raise ValueError(f"business_df.pkl missing columns: {missing_biz}")
+if missing_rev:
+    raise ValueError(f"reviews_train.pkl missing columns: {missing_rev}")
+
+# ===============================
+# 2. USER CATEGORY PROFILE (TRAIN)
+# ===============================
+
+def build_user_profile(user_id, min_positive_stars=4):
     """
-    Aggregate categories of businesses the user rated >= threshold,
-    returning a normalized preference vector over categories.
+    Build a normalized category preference vector for a user
+    from TRAIN reviews only (reviews with stars >= min_positive_stars).
     """
-    user_reviews = reviews[(reviews["user_id"] == user_id) & (reviews["stars"] >= rating_threshold)]
-    if user_reviews.empty:
-        return None  # cold-start user
-
-    # Collect indices of businesses this user liked
-    liked_biz_ids = user_reviews["business_id"].unique()
-    liked_indices = [bizid_to_idx[b] for b in liked_biz_ids if b in bizid_to_idx]
-
-    if not liked_indices:
+    user_reviews = reviews[reviews["user_id"] == user_id]
+    pos_reviews = user_reviews[user_reviews["stars"] >= min_positive_stars]
+    if pos_reviews.empty:
         return None
 
-    # Average the category vectors of liked businesses
-    liked_matrix = item_cat_matrix[liked_indices]
-    user_vec = liked_matrix.mean(axis=0)
+    pos_biz_ids = pos_reviews["business_id"].unique()
+    cat_mat = business_features.loc[
+        business_features.index.intersection(pos_biz_ids)
+    ]
+    if cat_mat.empty:
+        return None
 
-    # Normalize
-    norm = np.linalg.norm(user_vec)
-    if norm > 0:
-        user_vec = user_vec / norm
+    profile = cat_mat.mean(axis=0).values.astype(float)
+    norm = np.linalg.norm(profile)
+    if norm == 0:
+        return None
+    return profile / norm
 
-    return user_vec
+def add_category_similarity(candidates, user_profile):
+    """
+    Add a 'cat_sim' column to candidates, which is cosine similarity
+    between each business's category vector and the user profile.
+    If no profile exists, all cat_sim are set to 0.
+    """
+    candidates = candidates.copy()
+    if user_profile is None:
+        candidates["cat_sim"] = 0.0
+        return candidates
 
-# ===========
-# 3. SCORING FUNCTION
-#    content score × popularity factor
-# ===========
-def score_items_for_user(user_id, rating_threshold=4.0, min_review_count=5):
-    user_vec = build_user_profile(user_id, rating_threshold=rating_threshold)
-    if user_vec is None:
-        return None  # handle cold-start separately
+    cand_feats = business_features.loc[
+        business_features.index.intersection(candidates["business_id"])
+    ]
+    # Align order with candidates
+    cand_feats = cand_feats.reindex(candidates["business_id"])
 
-    # Cosine similarity between user profile and all restaurants
-    content_scores = cosine_similarity(user_vec.reshape(1, -1), item_cat_matrix)[0]  # shape: [n_items]
+    feats = cand_feats.values.astype(float)
+    norms = np.linalg.norm(feats, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    feats_norm = feats / norms
 
-    # Popularity / quality factor from business stars and review_count
-    biz_stars = business["stars"].values  # global average ratings
-    biz_reviews = business["review_count"].values.astype(float)
+    sims = feats_norm @ user_profile
+    candidates["cat_sim"] = sims
+    return candidates
 
-    # Normalize stars to [0,1] (assuming 1–5)
-    stars_norm = (biz_stars - 1.0) / (5.0 - 1.0)
+# ==============================================
+# 3. CATEGORY-FIRST, THEN POPULARITY RECOMMENDER
+# ==============================================
 
-    # Normalize log(review_count+1) to [0,1]
-    log_counts = np.log1p(biz_reviews)
-    log_counts_norm = (log_counts - log_counts.min()) / (log_counts.max() - log_counts.min() + 1e-8)
+def recommend_for_user(user_id, top_n=10, min_review_count=1):
+    """
+    Recommend restaurants for a user based on:
 
-    # Popularity weight
-    popularity = 0.7 * stars_norm + 0.3 * log_counts_norm
+    1. User's inferred city from TRAIN reviews (user_city_map).
+    2. Restaurants in that city the user has not already rated in TRAIN.
+    3. Primary sort: category similarity (cat_sim, descending).
+    4. Tie-breakers: review_count (descending), then stars (descending).
 
-    # Final score: content * (1 + alpha * popularity)
-    alpha = 1.0
-    final_scores = content_scores * (1.0 + alpha * popularity)
+    All personalization is based only on TRAIN data.
+    """
 
-    return final_scores
-
-# ===========
-# 4. TOP-N RECOMMEND FUNCTION
-# ===========
-def recommend_for_user(user_id, top_n=10, rating_threshold=4.0):
-    # Get inferred city for this user
+    # 1. City filter from TRAIN-based user_city_map
     user_city = user_city_map.get(user_id)
     if user_city is None:
         print("No inferred city for this user; cannot filter by location.")
         return pd.DataFrame()
 
-    scores = score_items_for_user(user_id, rating_threshold=rating_threshold)
-    if scores is None:
-        print("Cold-start user: no high-rated history.")
+    city_biz = business[business["city"] == user_city].copy()
+    if city_biz.empty:
+        print("No restaurants found in user city:", user_city)
         return pd.DataFrame()
 
-    # Exclude businesses the user has already rated
+    # 2. Exclude businesses the user already rated in TRAIN
     rated_biz_ids = reviews[reviews["user_id"] == user_id]["business_id"].unique()
-    rated_mask = business["business_id"].isin(rated_biz_ids)
-
-    # Filter to same city
-    same_city_mask = business["city"] == user_city
-
-    candidate_mask = (~rated_mask) & same_city_mask
-    candidate_indices = np.where(candidate_mask.values)[0]
-
-    if len(candidate_indices) == 0:
-        print("No candidate restaurants left in user city:", user_city)
+    city_biz = city_biz[~city_biz["business_id"].isin(rated_biz_ids)]
+    if city_biz.empty:
+        print("No unseen restaurants left in user city:", user_city)
         return pd.DataFrame()
 
-    candidate_scores = scores[candidate_indices]
+    # 3. Popularity threshold
+    city_biz = city_biz[city_biz["review_count"] >= min_review_count]
+    if city_biz.empty:
+        print("No restaurants with at least", min_review_count, "reviews in user city:", user_city)
+        return pd.DataFrame()
 
-    top_n = min(top_n, len(candidate_indices))
-    top_idx_local = np.argpartition(-candidate_scores, top_n - 1)[:top_n]
-    top_idx = candidate_indices[top_idx_local]
+    # 4. Category profile (TRAIN only) and similarity
+    user_profile = build_user_profile(user_id)
+    city_biz = add_category_similarity(city_biz, user_profile)
 
-    result = business.iloc[top_idx][["business_id", "name", "city", "stars", "review_count", "categories"]].copy()
-    result["score"] = scores[top_idx]
+    # 5. Sort: category similarity first, then review_count, then stars
+    city_biz = city_biz.sort_values(
+        by=["cat_sim", "review_count", "stars"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
 
-    result = result.sort_values("score", ascending=False).reset_index(drop=True)
+    # 6. Take top_n
+    result = city_biz[
+        ["business_id", "name", "city", "stars", "review_count", "categories", "cat_sim"]
+    ].head(top_n).reset_index(drop=True)
+
     return result
 
-# ===========
-# 5. EXAMPLE USAGE
-# ===========
+# =================
+# 4. EXAMPLE USAGE
+# =================
+
 if __name__ == "__main__":
-    example_user = "j14WgRoU_-2ZE1aw1dXrJg"  # replace with a real user_id from your data
-    recs = recommend_for_user(example_user, top_n=10, rating_threshold=4.0)
+    # Replace with a real user_id from your TRAIN data
+    example_user = "j14WgRoU_-2ZE1aw1dXrJg"
+    recs = recommend_for_user(example_user, top_n=10, min_review_count=10)
     print(recs)
