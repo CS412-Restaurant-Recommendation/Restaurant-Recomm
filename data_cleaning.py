@@ -12,21 +12,40 @@ with open(business_file, "r", encoding="utf-8") as fin, \
     
     for line in fin:
         record = json.loads(line)
+
         if record["business_id"] in valid_ids:
 
-        #Remove these values
-        # for key in ["is_open", "attributes"]:
-        #     record.pop(key, None)
-        # fout.write(json.dumps(record) + "\n")
-
-            # Keep these values
             keep_keys = [
                 "business_id", "name", "stars", "review_count", "categories", "city"
             ]
 
-            #TODO - Inside the categories list, remove check is it has "restaurant" if it exists and keep the rest of the categories
-
             record = {key: record.get(key) for key in keep_keys}
+
+            categories = record.get("categories")
+
+            if categories:
+                # Convert string → list
+                cat_list = [c.strip() for c in categories.split(",")]
+
+                cleaned_list = []
+                for cat in cat_list:
+                    lc = cat.lower()
+
+                    # REMOVE exactly "restaurants"
+                    if lc == "restaurants":
+                        continue
+
+                    # REMOVE exactly "food"
+                    if lc == "food":
+                        continue
+
+                    # KEEP everything else ("Fast Food", "Specialty Food", "Seafood", etc.)
+                    cleaned_list.append(cat)
+
+                # Save cleaned category string
+                record["categories"] = ", ".join(cleaned_list) if cleaned_list else None
+            else:
+                record["categories"] = None
 
             fout.write(json.dumps(record) + "\n")
 
