@@ -3,6 +3,8 @@
 import pandas as pd
 from pathlib import Path
 from sklearn.preprocessing import MultiLabelBinarizer
+from sklearn.metrics.pairwise import cosine_similarity 
+import numpy as np
 
 data_dir = Path("Dataset")
 
@@ -106,8 +108,34 @@ business_features.to_pickle(data_dir / "business_features.pkl")
 pd.Series(bizid_to_idx).to_pickle(data_dir / "bizid_to_idx.pkl")
 pd.Series(cat_feature_names).to_pickle(data_dir / "cat_feature_names.pkl")
 
-# Save reviews split
-train_reviews.to_pickle(data_dir / "reviews_train.pkl")
-test_reviews.to_pickle(data_dir / "reviews_test.pkl")
 
-print("Saved business_df.pkl, business_features.pkl, and train/test review splits.")
+# ========== NEW: build reduced CF artifacts from TRAIN ONLY ==========
+MAX_CF_USERS = 10000
+MAX_CF_ITEMS = 10000
+
+cf_reviews = train_reviews.copy()
+
+user_counts = cf_reviews["user_id"].value_counts()
+top_users = set(user_counts.nlargest(MAX_CF_USERS).index)
+cf_reviews = cf_reviews[cf_reviews["user_id"].isin(top_users)]
+
+biz_counts = cf_reviews["business_id"].value_counts()
+top_biz = set(biz_counts.nlargest(MAX_CF_ITEMS).index)
+cf_reviews = cf_reviews[cf_reviews["business_id"].isin(top_biz)]
+
+if not cf_reviews.empty:
+    user_item = cf_reviews.pivot_table(
+        index="user_id",
+        columns="business_id",
+        values="stars",
+        aggfunc="mean"
+    )
+else:
+    user_item = pd.DataFrame()
+
+# Save CF matrix and mappings
+user_item.to_pickle(data_dir / "user_item_cf.pkl")
+pd.Series({uid: i for i, uid in enumerate(user_item.index)}).to_pickle(
+    data_dir / "user_index_cf.pkl"
+)
+print("Saved user_item_cf.pkl and user_index_cf.pkl for CF.")
