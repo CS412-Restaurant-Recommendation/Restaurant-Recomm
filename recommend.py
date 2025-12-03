@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from sklearn.metrics.pairwise import cosine_similarity
-from new_user_recommendation import get_new_user_recommendations
 
 data_dir = Path("Dataset")
 
@@ -76,8 +75,8 @@ def build_user_profile(user_id, min_positive_stars=4):
     norm = np.linalg.norm(profile)
     if norm == 0:
         return None
-    return profile / norm
 
+    return profile / norm
 
 def add_category_similarity(candidates, user_profile):
     """
@@ -101,6 +100,7 @@ def add_category_similarity(candidates, user_profile):
     norms = np.linalg.norm(feats, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     feats_norm = feats / norms
+
     sims = feats_norm @ user_profile
     candidates["cat_sim"] = sims
     return candidates
@@ -135,13 +135,13 @@ def compute_cf_scores_for_user(user_id, candidate_biz_ids, k_neighbors=30):
 
     # Compute similarity with all users (reduced set)
     sims = cosine_similarity(target_vec, all_users_mat)[0]
-    sim_series = pd.Series(sims, index=user_item.index)
 
+    sim_series = pd.Series(sims, index=user_item.index)
     # Drop self
     sim_series = sim_series.drop(labels=[user_id], errors="ignore")
-
     # Keep top-k neighbors with positive similarity
     sim_series = sim_series[sim_series > 0].nlargest(k_neighbors)
+
     if sim_series.empty:
         return pd.DataFrame({
             "business_id": list(candidate_biz_ids),
@@ -157,6 +157,7 @@ def compute_cf_scores_for_user(user_id, candidate_biz_ids, k_neighbors=30):
         if bid not in neighbor_ratings.columns:
             cf_scores.append(0.0)
             continue
+
         col = neighbor_ratings[bid].values.reshape(-1, 1)  # neighbor ratings
         mask = ~np.isnan(col)
         if not mask.any():
@@ -237,25 +238,12 @@ def recommend_for_user(user_id, top_n=10, min_review_count=1):
 
     return result
 
+# =================
+# 4. EXAMPLE USAGE
+# =================
 
-def get_recommendations(user_id: str, top_n: int = 10, min_review_count: int = 1):
-    """
-    Wrapper function for external callers (e.g., FastAPI).
-    Returns a list of dicts (JSON-serializable).
-    For unknown users (no city mapping), falls back to global new-user recommendations.
-    """
-    # Check if this user has an inferred city; if not, treat as new user
-    user_city = user_city_map.get(user_id)
-    if user_city is None:
-        # cold-start path
-        return get_new_user_recommendations(top_n=top_n)
-
-    # existing-user path
-    df = recommend_for_user(user_id=user_id, top_n=top_n, min_review_count=min_review_count)
-
-    # If nothing came back (e.g., filtered out), also fall back to cold-start
-    if df.empty:
-        return get_new_user_recommendations(top_n=top_n)
-
-    return df.to_dict(orient="records")
-
+if __name__ == "__main__":
+    # Replace with a real user_id from your TRAIN data
+    example_user = "j14WgRoU_-2ZE1aw1dXrJg"
+    recs = recommend_for_user(example_user, top_n=10, min_review_count=10)
+    print(recs)

@@ -5,10 +5,13 @@ from pathlib import Path
 data_dir = Path("Dataset")
 
 business = pd.read_pickle(data_dir / "business_df.pkl")
-reviews = pd.read_pickle(data_dir / "reviews_df.pkl")
+reviews = pd.read_pickle(data_dir / "reviews_train.pkl")
 
 # Ensure columns exist
 business = business[["business_id", "city"]].dropna(subset=["business_id", "city"])
+print(business.columns)
+print(business.head())
+
 reviews = reviews[["user_id", "business_id", "stars"]].dropna(subset=["user_id", "business_id"])
 
 # Join to attach city to each review
