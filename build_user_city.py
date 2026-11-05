@@ -2,7 +2,7 @@
 import pandas as pd
 from pathlib import Path
 
-data_dir = Path("Dataset")
+data_dir = Path(__file__).resolve().parent / "Dataset"
 
 business = pd.read_pickle(data_dir / "business_df.pkl")
 reviews = pd.read_pickle(data_dir / "reviews_df.pkl")

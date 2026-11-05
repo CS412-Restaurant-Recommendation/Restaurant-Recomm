@@ -4,7 +4,7 @@ import pandas as pd
 from pathlib import Path
 from recommend import recommend_for_user  # uses TRAIN-only data
 
-data_dir = Path("Dataset")
+data_dir = Path(__file__).resolve().parent / "Dataset"
 
 # Load held-out TEST reviews (30%)
 test_reviews = pd.read_pickle(data_dir / "reviews_test.pkl")

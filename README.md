@@ -13,6 +13,7 @@ A hybrid restaurant recommendation system built on the [Yelp Open Dataset](https
 - [Setup](#setup)
 - [Data Pipeline (one-time)](#data-pipeline-one-time)
 - [Running the API](#running-the-api)
+- [AI Chat Agent](#ai-chat-agent)
 - [API Reference](#api-reference)
 - [Evaluation](#evaluation)
 - [Sentiment Analysis](#sentiment-analysis)
@@ -172,6 +173,19 @@ Infers each user's **home city** as the city where they've reviewed the most res
 
 Artifacts saved: `user_city_df.pkl`, `user_city_map.pkl`
 
+### Step 4 — Build the chat agent's data store
+
+```bash
+python build_agent_store.py            # or --only details|reviews|users
+```
+
+Builds the extra data the AI chat agent uses, restricted to restaurants in `business_df.pkl`:
+- **Restaurant details:** address, hours, price range and amenities, from `yelp_academic_dataset_business.json`.
+- **Review store:** a SQLite database with full-text search over review text and per-business star histograms. It reads `filtered_yelp_review.json`, streamed directly from `Archive.zip` if not extracted. This takes several minutes and produces a database of about 3 GB.
+- **User names:** first names from `filtered_yelp_user.json`.
+
+Artifacts saved: `business_details.pkl`, `reviews.db`, `user_names.pkl`
+
 ---
 
 ## Running the API
@@ -183,6 +197,32 @@ uvicorn main:app --reload
 The API will be available at `http://127.0.0.1:8000`.
 
 Interactive docs (Swagger UI): `http://127.0.0.1:8000/docs`
+
+---
+
+## AI Chat Agent
+
+A Gemini-powered assistant that answers **only from this project's data and models**: recommendations, explanations, cuisine filters, restaurant details, ratings and reviews. It calls the recommender and data store as tools through a hand-written tool-calling loop (`agent/agent.py`). It has no internet access.
+
+**Setup**
+1. Complete the data pipeline, including Step 4 (`build_agent_store.py`).
+2. Copy `.env.example` to `.env` and set `GOOGLE_API_KEY`. `GEMINI_MODEL` is optional.
+
+**Run** (two terminals):
+```bash
+uvicorn main:app             # API: also serves POST /session and POST /chat
+streamlit run app_chat.py    # chat UI at http://localhost:8501
+```
+In the sidebar, pick a sample user, enter a Yelp `user_id`, or choose **New user**, then press **Start chat**. The user ID is bound to the session on the server, so the model never chooses whose data to read. Each reply has a **debug** expander listing the tool calls the agent made and a groundedness check.
+
+**Endpoints**
+- `GET /users/sample?n=20`: known users with the most history, for the UI picker.
+- `POST /session` `{"user_id": "<id or null>"}` returns `{session_id, user_known, name, home_city}`.
+- `POST /chat` `{"session_id": "...", "message": "..."}` returns `{reply, tool_calls, grounded, ungrounded_names}`.
+
+**Tests** (offline, with a fake Gemini client): `python -m tests.test_agent_loop`
+
+> On Gemini's free tier (5 requests per minute), one chat turn can use 2–4 requests. The agent waits and retries when it's rate-limited, so replies may sometimes take longer.
 
 ---
 

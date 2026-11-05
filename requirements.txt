@@ -2,3 +2,7 @@ fastapi
 pandas
 scikit-learn
 uvicorn
+google-genai
+streamlit
+python-dotenv
+requests

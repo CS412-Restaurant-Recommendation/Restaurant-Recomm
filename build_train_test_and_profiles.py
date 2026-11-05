@@ -6,7 +6,7 @@ from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.metrics.pairwise import cosine_similarity 
 import numpy as np
 
-data_dir = Path("Dataset")
+data_dir = Path(__file__).resolve().parent / "Dataset"
 
 business_path = data_dir / "filtered_yelp_business.json"
 review_path = data_dir / "filtered_yelp_review.json"
